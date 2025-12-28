@@ -1,146 +1,191 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
+from PIL import Image
 import torch
 from transformers import CLIPProcessor, CLIPModel
-from PIL import Image
-import os
 
-# --- CONFIGURATION & PATHS ---
-# Since your files are in the same folder as app.py, we use "."
-DATA_PATH = "."
-IMAGES_PATH = os.path.join(DATA_PATH, "images")
-csv_path = os.path.join(DATA_PATH, "articles.csv")
-embeddings_path = os.path.join(DATA_PATH, "embeddings.npy")
-ids_path = os.path.join(DATA_PATH, "ids.npy")
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="StyleMatch AI",
+    page_icon="✨",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Page Config
-st.set_page_config(page_title="AI Fashion Stylist", layout="wide")
-st.title("🛍️ Visual Style Recommender")
+# --- 2. CUSTOM CSS STYLING ---
 st.markdown("""
-**How it works:** 1. Upload an image of a clothing item.
-2. The AI (CLIP) converts it into a mathematical vector.
-3. It finds the nearest matching styles from our H&M inventory.
-""")
+<style>
+    /* Main Background */
+    .stApp {
+        background-color: #0E1117;
+    }
+    
+    /* Header Styling */
+    h1 {
+        color: #FFFFFF;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-weight: 700;
+        text-align: center;
+        padding-bottom: 20px;
+        background: -webkit-linear-gradient(45deg, #FF6B6B, #4ECDC4);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    
+    /* Card Styling for Results */
+    div.stImage {
+        border-radius: 10px;
+        transition: transform 0.3s;
+    }
+    div.stImage:hover {
+        transform: scale(1.05);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    
+    /* Upload Section */
+    .upload-text {
+        text-align: center;
+        color: #FAFAFA;
+        font-size: 1.2rem;
+        margin-bottom: 20px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- 1. LOAD RESOURCES (Cached for speed) ---
+# --- 3. PATH SETUP ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(BASE_DIR, "articles.csv")
+EMBEDDINGS_PATH = os.path.join(BASE_DIR, "embeddings.npy")
+IDS_PATH = os.path.join(BASE_DIR, "ids.npy")
+
+# --- 4. LOAD AI ENGINE ---
 @st.cache_resource
 def load_model():
-    # Load CLIP model to CPU (Processing 1 image is fast on CPU)
-    print("Loading Model...")
     model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     return model, processor
 
 @st.cache_data
-def load_data():
-    print("Loading Database...")
-    # Load the "Brain"
-    emb = np.load(embeddings_path)
-    ids = np.load(ids_path, allow_pickle=True) # allow_pickle needed for strings
-    # Load Metadata (force string type for IDs to avoid leading-zero errors)
-    df = pd.read_csv(csv_path, dtype={'article_id': str})
-    return emb, ids, df
+def load_database():
+    if not os.path.exists(EMBEDDINGS_PATH):
+        return None, None, None
+    embeddings = np.load(EMBEDDINGS_PATH)
+    ids = np.load(IDS_PATH, allow_pickle=True)
+    df = pd.read_csv(CSV_PATH, dtype={'article_id': str})
+    return embeddings, ids, df
 
-# Load everything on startup
-with st.spinner("Loading AI Brain... (This happens only once)"):
-    model, processor = load_model()
-    embeddings, item_ids, df = load_data()
+# Load silently in background
+model, processor = load_model()
+embeddings, item_ids, df = load_database()
 
-# --- 2. THE SEARCH ENGINE ---
-def find_similar_items(image, top_k=5):
-    # Process the uploaded image
-    inputs = processor(images=image, return_tensors="pt", padding=True)
+# --- 5. LOGIC & FUNCTIONS ---
+def get_image_path(article_id):
+    # Smart path finding (checks nested and flat structures)
+    subfolder = article_id[:3]
+    path_nested = os.path.join(BASE_DIR, "images", subfolder, article_id + ".jpg")
+    path_root = os.path.join(BASE_DIR, subfolder, article_id + ".jpg")
     
+    if os.path.exists(path_nested): return path_nested
+    if os.path.exists(path_root): return path_root
+    return None
+
+def find_similar_items(image, top_k=5):
+    inputs = processor(images=image, return_tensors="pt", padding=True)
     with torch.no_grad():
-        # Get vector for uploaded image
         query_vector = model.get_image_features(**inputs)
-        # Normalize
         query_vector = query_vector / query_vector.norm(p=2, dim=-1, keepdim=True)
         query_vector = query_vector.numpy()
-
-    # Calculate Similarity (Dot Product)
-    # Shape: (1, 512) @ (512, N) -> (1, N)
+    
     scores = np.dot(query_vector, embeddings.T).flatten()
-    
-    # Get Top K indices (highest scores)
     top_indices = np.argsort(scores)[-top_k:][::-1]
-    
     return top_indices, scores
 
-# --- 3. HELPER: GET IMAGE PATH ---
-def get_image_path(article_id):
-    # H&M structure is usually: images/010/0108775015.jpg
-    # But since you might have unzipped differently, let's check robustly
-    
-    # Standard H&M logic (subfolders based on first 3 digits)
-    subfolder = article_id[:3]
-    path_with_subfolder = os.path.join(IMAGES_PATH, subfolder, article_id + ".jpg")
-    
-    # Fallback: maybe images are just flat in the folder?
-    path_flat = os.path.join(IMAGES_PATH, article_id + ".jpg")
-    
-    if os.path.exists(path_with_subfolder):
-        return path_with_subfolder
-    elif os.path.exists(path_flat):
-        return path_flat
-    else:
-        return None
+# --- 6. THE UI LAYOUT ---
 
-# --- 4. USER INTERFACE ---
-col1, col2 = st.columns([1, 2])
+# Header Section
+st.markdown("<h1>✨ StyleMatch AI</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #BBBBBB; margin-bottom: 40px;'>Visual Search Engine powered by OpenAI CLIP</p>", unsafe_allow_html=True)
 
-with col1:
-    st.subheader("1. Upload Photo")
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
-    
-    if uploaded_file is not None:
-        # Display User Image
-        image = Image.open(uploaded_file).convert("RGB")
-        st.image(image, caption="Your Query Item", use_column_width=True)
+# Main Container
+if embeddings is None:
+    st.error("⚠️ Database missing! Check repo files.")
+else:
+    # Sidebar for Upload
+    with st.sidebar:
+        st.header("📸 Start Here")
+        uploaded_file = st.file_uploader("Upload an item", type=["jpg", "png", "jpeg"])
         
-        # Search Button
-        if st.button("🔍 Find Similar Styles"):
-            with st.spinner("Analyzing style patterns..."):
-                indices, scores = find_similar_items(image)
-                st.session_state['results'] = (indices, scores)
+        st.markdown("---")
+        st.markdown("### 💡 How it works")
+        st.info(
+            "This app doesn't use simple tags. "
+            "It uses **Computer Vision** to understand "
+            "texture, shape, and style to find "
+            "visually similar matches."
+        )
 
-# --- 5. RESULTS DISPLAY ---
-with col2:
-    st.subheader("2. Recommendations")
-    
-    if 'results' in st.session_state:
-        indices, scores = st.session_state['results']
+    # Main Content Area
+    if uploaded_file:
+        col1, col2 = st.columns([1, 2])
         
-        # Create a grid of 5 columns
-        cols = st.columns(5)
-        
-        for i, idx in enumerate(indices):
-            rec_id = item_ids[idx]
-            score = scores[idx]
+        with col1:
+            st.subheader("Your Query")
+            user_image = Image.open(uploaded_file).convert("RGB")
+            st.image(user_image, use_column_width=True, caption="Analyzed Pattern")
             
-            # Get Metadata
-            # Filter the dataframe safely
-            meta_rows = df[df['article_id'] == rec_id]
-            
-            if not meta_rows.empty:
-                meta = meta_rows.iloc[0]
-                name = meta.get('prod_name', 'Unknown')
-                category = meta.get('product_type_name', 'Unknown')
+            if st.button("🔍 Search Database", type="primary", use_container_width=True):
+                with st.spinner("Scanning 5,000+ items..."):
+                    indices, scores = find_similar_items(user_image)
+                    st.session_state['results'] = (indices, scores)
+
+        with col2:
+            st.subheader("Top Recommendations")
+            if 'results' in st.session_state:
+                indices, scores = st.session_state['results']
+                
+                # Show results in a clean grid
+                cols = st.columns(3) # 3 items per row
+                for i, idx in enumerate(indices[:3]):
+                    with cols[i]:
+                        rec_id = item_ids[idx]
+                        score = scores[idx]
+                        meta = df[df['article_id'] == rec_id].iloc[0]
+                        
+                        img_path = get_image_path(rec_id)
+                        if img_path:
+                            st.image(img_path, use_column_width=True)
+                            st.markdown(f"**{meta.get('prod_name', 'Item')}**")
+                            st.caption(f"Match Score: {int(score*100)}%")
+                        else:
+                            st.warning("Image Missing")
+
+                # Second row for remaining items
+                cols_2 = st.columns(3)
+                for i, idx in enumerate(indices[3:5]): # Next 2 items
+                    with cols_2[i]:
+                        rec_id = item_ids[idx]
+                        score = scores[idx]
+                        meta = df[df['article_id'] == rec_id].iloc[0]
+                        
+                        img_path = get_image_path(rec_id)
+                        if img_path:
+                            st.image(img_path, use_column_width=True)
+                            st.markdown(f"**{meta.get('prod_name', 'Item')}**")
+                            st.caption(f"Match Score: {int(score*100)}%")
             else:
-                name = "Unknown Item"
-                category = "Unknown"
-            
-            # Show in Grid
-            with cols[i]:
-                img_path = get_image_path(rec_id)
-                
-                if img_path:
-                    st.image(img_path, use_column_width=True)
-                else:
-                    st.warning("Img Missing")
-                
-                st.caption(f"**{name}**\n\n*{category}*\n\nMatch: {score:.2f}")
-
+                st.info("👈 Upload an image in the sidebar to begin.")
+    
     else:
-        st.info("Upload an image to see recommendations here.")
+        # Welcome State (No image uploaded yet)
+        st.markdown("<div class='upload-text'>waiting for input...</div>", unsafe_allow_html=True)
+        # Display some random examples from your dataset as "Inspiration"
+        st.subheader("Explore the Collection")
+        example_cols = st.columns(5)
+        random_indices = np.random.choice(len(item_ids), 5)
+        for i, idx in enumerate(random_indices):
+            with example_cols[i]:
+                rec_id = item_ids[idx]
+                path = get_image_path(rec_id)
+                if path: st.image(path, use_column_width=True)
